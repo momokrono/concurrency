@@ -5,12 +5,14 @@
 #include <thread>
 #include <condition_variable>
 #include <functional>
+//#include "new_locks.hpp"
 #include "custom_locks.hpp"
 
 
 using lock_t = std::unique_lock<spin_mutex>;
 
 class notification_queue {
+    const unsigned _count{std::thread::hardware_concurrency()};
     std::deque<std::function<void()>> _q;
     bool _done{false};
     spin_mutex _mutex;
@@ -36,12 +38,17 @@ public:
         return true;
     }
 
+    auto clear() noexcept -> void {
+        lock_t lock{_mutex};
+        _q.clear();
+    }
+
     auto done() noexcept -> void {
         {
             lock_t lock{_mutex};
             _done = true;
         }
-        _pop.release(std::thread::hardware_concurrency());
+        _pop.release(_count);
     }
 
     constexpr auto pop(std::function<void()>& x) noexcept -> bool {
@@ -103,6 +110,10 @@ public:
         for ( auto & t : _threads ) { t.request_stop(); }
     }
 
+    constexpr auto clear() noexcept -> void {
+        for ( auto & q : _q ) { q.clear(); }
+    }
+
     template<typename F, typename ...Args>
     constexpr auto async(F && f, Args... args) noexcept -> void {
         auto i = _index++;
@@ -122,4 +133,3 @@ public:
 
 
 #endif
-
