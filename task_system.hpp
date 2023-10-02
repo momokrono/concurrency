@@ -14,8 +14,8 @@ class notification_queue {
 private:
     std::deque<std::function<void()>> _q;
     bool _done{false};
-    spin_mutex _mutex;
     const unsigned _count{std::thread::hardware_concurrency()};
+    spin_mutex _mutex;
     std::binary_semaphore _pop{0};
 
 public:
@@ -67,13 +67,10 @@ public:
         return true;
     }
 
-    template<typename F, typename ...Args>
-    auto push(F && f, Args... args) noexcept -> void {
+    auto push(auto && f) noexcept -> void {
         {
             lock_t lock{_mutex};
-            _q.emplace_back( [fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
-                return std::apply(std::move(fn), args);
-            });
+            _q.emplace_back( std::forward<decltype(f)>(f));
         }
         _pop.release();
     }
@@ -119,17 +116,17 @@ public:
     }
 
     template<typename F, typename ...Args>
-    constexpr auto async(F && f, Args... args) noexcept -> void {
+    constexpr auto async(F && f, Args &&... args) noexcept -> void {
         auto i = _index++;
         for ( unsigned n = 0; n != _count * 4; ++n ) {
             if ( _q[ (i + n) % _count ].try_push(
                     [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
-                        return std::apply(std::move(fn), args);
+                        return std::apply(std::move(fn), std::move(args));
                     } ) ) { return; }
         }
         _q[ i % _count ].push(
                 [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
-                    return std::apply(std::move(fn), args); } );
+                    return std::apply(std::move(fn), std::move(args)); } );
     }
 };
 
