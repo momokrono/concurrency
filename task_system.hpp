@@ -8,20 +8,21 @@
 #include <mutex>
 #include <print>
 #include <exception>
+#include <future>
 #include "custom_locks.hpp"
 
 using lock_t = std::unique_lock<spin_mutex>;
 
 class notification_queue {
 private:
-    std::deque<std::function<void()>> _q;
+    std::deque<std::move_only_function<void()>> _q;
     bool _done{false};
     const unsigned _count{std::thread::hardware_concurrency()};
     spin_mutex _mutex;
     std::condition_variable_any _ready;
 
 public:
-    auto try_pop(std::function<void()>& x) noexcept -> bool {
+    auto try_pop(std::move_only_function<void()>& x) noexcept -> bool {
         lock_t lock{_mutex, std::try_to_lock};
         if ( !lock || _q.empty() ) { return false; }
         x = std::move(_q.front());
@@ -55,7 +56,7 @@ public:
         _ready.notify_all();
     }
 
-    auto pop(std::function<void()>& x) noexcept -> bool {
+    auto pop(std::move_only_function<void()>& x) noexcept -> bool {
         lock_t lock{_mutex};
         while (_q.empty() && !_done) {
             _ready.wait(lock);
@@ -91,7 +92,7 @@ class task_system {
 
     constexpr auto run(std::stop_token const & s, unsigned i) noexcept -> void {
         while ( !s.stop_requested() ) {
-            auto f = std::function<void()>{};
+            auto f = std::move_only_function<void()>{};
             for ( unsigned n = 0; n != _count * 2; ++n ) {
                 if ( _q[ (i + n) % _count].try_pop(f) ) { break; }
             }
@@ -147,7 +148,7 @@ public:
         auto i = _index++;
         for ( unsigned n = 0; n != _count * 4; ++n ) {
             if ( _q[ (i + n) % _count ].try_push(
-                    [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
+                    [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ]() mutable {
                         return std::apply(std::move(fn), std::move(args));
                     } ) ) { 
                         _submitted_tasks.fetch_add(1, std::memory_order_relaxed);
@@ -155,9 +156,28 @@ public:
                     }
         }
         _q[ i % _count ].push(
-                [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
+                [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ]() mutable {
                     return std::apply(std::move(fn), std::move(args)); } );
         _submitted_tasks.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    template<typename F, typename ...Args>
+    auto async_with_future(F && f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...>> {
+        using return_t = std::invoke_result_t<F, Args...>;
+
+        auto task = std::packaged_task<return_t()>(
+            [fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...}]() {
+                return std::apply(std::move(fn), std::move(args));
+            }
+        );
+
+        auto future = task.get_future();
+
+        async([t = std::move(task)]() mutable {
+            t();
+        });
+
+        return future;
     }
 };
 
