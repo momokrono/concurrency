@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <print>
+#include <exception>
 #include "custom_locks.hpp"
 
 using lock_t = std::unique_lock<spin_mutex>;
@@ -81,6 +83,7 @@ class task_system {
     std::vector<std::jthread> _threads;
     std::vector<notification_queue> _q{_count};
     std::atomic<unsigned> _index{0};
+    std::atomic<unsigned> _active_tasks{0};
 
     constexpr auto run(std::stop_token const & s, unsigned i) noexcept -> void {
         while ( !s.stop_requested() ) {
@@ -90,7 +93,15 @@ class task_system {
             }
             if ( !f && !_q[i].pop(f) ) { break; }
 
-            f();
+            _active_tasks.fetch_add(1, std::memory_order_relaxed);
+            try {
+                f();
+            } catch (const std::exception& e) {
+                std::println(stderr, "Task system caught exception in thread {}: {}", i, e.what());
+            } catch (...) {
+                std::println(stderr, "Task system caught unknown exception in thread {}.", i);
+            }
+            _active_tasks.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 
