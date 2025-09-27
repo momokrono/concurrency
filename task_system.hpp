@@ -84,6 +84,10 @@ class task_system {
     std::vector<notification_queue> _q{_count};
     std::atomic<unsigned> _index{0};
     std::atomic<unsigned> _active_tasks{0};
+    std::atomic<unsigned long> _submitted_tasks{0};
+    std::atomic<unsigned long> _completed_tasks{0};
+    std::mutex _wait_mutex;
+    std::condition_variable _wait_cv;
 
     constexpr auto run(std::stop_token const & s, unsigned i) noexcept -> void {
         while ( !s.stop_requested() ) {
@@ -102,6 +106,8 @@ class task_system {
                 std::println(stderr, "Task system caught unknown exception in thread {}.", i);
             }
             _active_tasks.fetch_sub(1, std::memory_order_relaxed);
+            _completed_tasks.fetch_add(1, std::memory_order_relaxed);
+            _wait_cv.notify_all();
         }
     }
 
@@ -125,6 +131,11 @@ public:
         for ( auto & q : _q ) { q.clear(); }
     }
 
+    constexpr auto wait_all_tasks() noexcept -> void {
+        std::unique_lock lock(_wait_mutex);
+        _wait_cv.wait(lock, [this]{ return _completed_tasks.load() == _submitted_tasks.load(); });
+    }
+
     template<typename F, typename ...Args>
     constexpr auto async(F && f, Args &&... args) noexcept -> void {
         auto i = _index++;
@@ -132,11 +143,15 @@ public:
             if ( _q[ (i + n) % _count ].try_push(
                     [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
                         return std::apply(std::move(fn), std::move(args));
-                    } ) ) { return; }
+                    } ) ) { 
+                        _submitted_tasks.fetch_add(1, std::memory_order_relaxed);
+                        return; 
+                    }
         }
         _q[ i % _count ].push(
                 [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ] {
                     return std::apply(std::move(fn), std::move(args)); } );
+        _submitted_tasks.fetch_add(1, std::memory_order_relaxed);
     }
 };
 
