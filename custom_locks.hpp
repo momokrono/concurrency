@@ -38,10 +38,8 @@ public:
         out.notify_all();
     }
     constexpr auto try_lock() noexcept -> bool {
-        auto const my = in.load(std::memory_order_acquire);
-        auto const now = out.load(std::memory_order_acquire);
-        if (now == my) {
-            in.fetch_add(1, std::memory_order_acquire);
+        if (auto ticket = out.load(std::memory_order_acquire);
+            in.compare_exchange_strong(ticket, ticket + 1, std::memory_order_acq_rel)) {
             return true;
         }
         return false;

@@ -5,8 +5,8 @@
 #include <thread>
 #include <condition_variable>
 #include <functional>
+#include <mutex>
 #include "custom_locks.hpp"
-
 
 using lock_t = std::unique_lock<spin_mutex>;
 
@@ -16,7 +16,7 @@ private:
     bool _done{false};
     const unsigned _count{std::thread::hardware_concurrency()};
     spin_mutex _mutex;
-    std::binary_semaphore _pop{0};
+    std::condition_variable_any _ready;
 
 public:
     auto try_pop(std::function<void()>& x) noexcept -> bool {
@@ -33,7 +33,7 @@ public:
             if (!lock) { return false; }
             _q.emplace_back(std::forward<decltype(f)>(f));
         }
-        _pop.release();
+        _ready.notify_one();
         return true;
     }
 
@@ -42,7 +42,7 @@ public:
             lock_t lock{_mutex};
             _done = true;
         }
-        _pop.release(_count);
+        _ready.notify_all();
     }
 
     auto clear() noexcept -> void {
@@ -50,19 +50,18 @@ public:
             lock_t lock{_mutex};
             _q.clear();
         }
-        _pop.release(_count);
+        _ready.notify_all();
     }
 
     auto pop(std::function<void()>& x) noexcept -> bool {
-        while ( _q.empty() && !_done ) {
-            _pop.acquire();
-        }
         lock_t lock{_mutex};
-        if ( _q.empty() ) {
-            _pop.release();
+        while (_q.empty() && !_done) {
+            _ready.wait(lock);
+        }
+        if (_q.empty()) {
             return false;
         }
-        x = std::move( _q.front() );
+        x = std::move(_q.front());
         _q.pop_front();
         return true;
     }
@@ -72,7 +71,7 @@ public:
             lock_t lock{_mutex};
             _q.emplace_back( std::forward<decltype(f)>(f));
         }
-        _pop.release();
+        _ready.notify_one();
     }
 };
 
