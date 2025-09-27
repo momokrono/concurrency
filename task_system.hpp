@@ -131,6 +131,12 @@ public:
         for ( auto & q : _q ) { q.clear(); }
     }
 
+    constexpr auto sync_point() noexcept -> void {
+        unsigned long target = _submitted_tasks.load(std::memory_order_relaxed);
+        std::unique_lock lock(_wait_mutex);
+        _wait_cv.wait(lock, [this, target]{ return _completed_tasks.load() >= target; });
+    }
+
     constexpr auto wait_all_tasks() noexcept -> void {
         std::unique_lock lock(_wait_mutex);
         _wait_cv.wait(lock, [this]{ return _completed_tasks.load() == _submitted_tasks.load(); });
