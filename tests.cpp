@@ -476,3 +476,228 @@ TEST(TaskSystem, ThroughputSanity) {
     ASSERT_EQ(c.load(), n);
     ASSERT_LT(dt, 1000) << "throughput too low: " << dt << "ms for " << n << " tasks";
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  task_system — edge cases
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(TaskSystem, StopThenSyncPoint) {
+    // sync_point after stop() should not hang.
+    // Workers are stopped, so any remaining tasks won't complete.
+    // sync_point should handle this gracefully.
+    task_system ts{4};
+    std::atomic<int> c{0};
+
+    for (int i = 0; i < 100; ++i)
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+
+    ts.wait_all_tasks();  // drain everything first
+    ASSERT_EQ(c.load(), 100);
+
+    ts.stop();
+
+    // Submit tasks after stop — they may never execute.
+    // sync_point should not wait for them (or should return immediately).
+    for (int i = 0; i < 50; ++i)
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+
+    ts.sync_point();  // must not hang
+    SUCCEED();
+}
+
+TEST(TaskSystem, StopThenWaitAllTasks) {
+    task_system ts{4};
+
+    for (int i = 0; i < 100; ++i)
+        ts.async([] {});
+    ts.wait_all_tasks();
+    ts.stop();
+
+    // wait_all_tasks after stop with zero pending should return immediately
+    ts.wait_all_tasks();
+    SUCCEED();
+}
+
+TEST(TaskSystem, FutureWithSyncPoint) {
+    // sync_point must wait for async_with_future tasks too
+    task_system ts{4};
+    std::atomic<bool> done{false};
+
+    auto f = ts.async_with_future([&] { done.store(true); return 42; });
+    ts.sync_point();  // must wait for the future task
+
+    ASSERT_TRUE(done.load());
+    ASSERT_EQ(f.get(), 42);
+}
+
+TEST(TaskSystem, ReentrantAsync) {
+    // A task that captures task_system& and calls async() from within
+    // itself — stresses re-entrant async under execution.
+    task_system ts{4};
+    std::atomic<int> counter{0};
+    constexpr int depth = 4;
+    constexpr int total = 1 + depth;  // root + depth children
+
+    ts.async([&] {
+        counter.fetch_add(1, std::memory_order_relaxed);
+        // Spawn child tasks from within a worker
+        for (int i = 0; i < depth; ++i)
+            ts.async([&] { counter.fetch_add(1, std::memory_order_relaxed); });
+    });
+
+    ts.wait_all_tasks();
+    ASSERT_EQ(counter.load(), total);
+}
+
+TEST(TaskSystem, ReentrantFutureFromTask) {
+    // A task calling async_with_future() from within another task
+    task_system ts{4};
+    std::atomic<int> c{0};
+
+    auto outer = ts.async_with_future([&] {
+        c.fetch_add(1, std::memory_order_relaxed);
+        // Submit more work from within a running task
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+        ts.async_with_future([&] { c.fetch_add(1, std::memory_order_relaxed); return 7; });
+        return 42;
+    });
+
+    ASSERT_EQ(outer.get(), 42);
+    ts.wait_all_tasks();
+    ASSERT_EQ(c.load(), 3);
+}
+
+TEST(TaskSystem, ConsecutiveClear) {
+    task_system ts{4};
+    std::atomic<int> c{0};
+
+    for (int i = 0; i < 10'000; ++i)
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+    ts.clear();
+    ts.clear();  // double clear — must not corrupt state
+
+    // Submit after double-clear
+    std::atomic<int> c2{0};
+    for (int i = 0; i < 1'000; ++i)
+        ts.async([&] { c2.fetch_add(1, std::memory_order_relaxed); });
+    ts.wait_all_tasks();
+    ASSERT_EQ(c2.load(), 1'000);
+}
+
+TEST(TaskSystem, HighVolume500k) {
+    task_system ts{4};
+    std::atomic<int> c{0};
+    constexpr int n = 500'000;
+
+    for (int i = 0; i < n; ++i)
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+    ts.wait_all_tasks();
+    ASSERT_EQ(c.load(), n);
+}
+
+// Submit tasks DURING wait_all_tasks — ensures wait doesn't return early
+TEST(TaskSystem, WaitAllTasksDuringSubmit) {
+    task_system ts{4};
+    std::atomic<int> c{0};
+    std::atomic<bool> go{false};
+    constexpr int n = 20'000;
+
+    // Submit first half
+    for (int i = 0; i < n/2; ++i)
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+
+    // Start waiter thread
+    std::jthread waiter{[&] {
+        while (!go.load(std::memory_order_relaxed));
+        ts.wait_all_tasks();
+    }};
+
+    // While waiter is blocked, submit second half
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    for (int i = 0; i < n/2; ++i)
+        ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
+
+    go.store(true, std::memory_order_relaxed);
+    waiter.join();
+
+    ASSERT_EQ(c.load(), n);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  spin_mutex — fairness under try_lock pressure
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(SpinMutex, LockFairnessUnderTryLock) {
+    // spin_mutex is intentionally unfair. This test verifies the system
+    // survives heavy mixed lock/try_lock pressure without crashing.
+    spin_mutex mtx;
+    std::atomic<int> cs_count{0};
+    std::atomic<bool> race{false};
+
+    auto worker = [&](bool use_lock) {
+        for (int i = 0; i < 20'000; ++i) {
+            if (use_lock) {
+                mtx.lock();
+            } else if (!mtx.try_lock()) {
+                continue;
+            }
+            cs_count.fetch_add(1, std::memory_order_relaxed);
+            if (cs_count.load(std::memory_order_relaxed) > 1)
+                race.store(true, std::memory_order_relaxed);
+            cs_count.fetch_sub(1, std::memory_order_relaxed);
+            mtx.unlock();
+        }
+    };
+
+    std::vector<std::jthread> threads;
+    threads.emplace_back(worker, true);   // lock() caller
+    threads.emplace_back(worker, true);   // lock() caller
+    threads.emplace_back(worker, false);  // try_lock() caller
+    threads.emplace_back(worker, false);  // try_lock() caller
+    threads.clear();
+
+    ASSERT_FALSE(race.load()) << "mutual exclusion violated under mixed lock types";
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  ticket_mutex — mixed lock/try_lock
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST(TicketMutex, MixedLockAndTryLock) {
+    // lock() and try_lock() interleaved — does ticket order hold?
+    ticket_mutex mtx;
+    std::atomic<int> counter{0};
+    std::atomic<bool> race{false};
+
+    auto lock_worker = [&] {
+        for (int i = 0; i < 5000; ++i) {
+            mtx.lock();
+            counter.fetch_add(1, std::memory_order_relaxed);
+            if (counter.load(std::memory_order_relaxed) > 1)
+                race.store(true, std::memory_order_relaxed);
+            counter.fetch_sub(1, std::memory_order_relaxed);
+            mtx.unlock();
+        }
+    };
+
+    auto try_worker = [&] {
+        for (int i = 0; i < 5000; ++i) {
+            if (mtx.try_lock()) {
+                counter.fetch_add(1, std::memory_order_relaxed);
+                if (counter.load(std::memory_order_relaxed) > 1)
+                    race.store(true, std::memory_order_relaxed);
+                counter.fetch_sub(1, std::memory_order_relaxed);
+                mtx.unlock();
+            }
+        }
+    };
+
+    std::vector<std::jthread> threads;
+    threads.emplace_back(lock_worker);
+    threads.emplace_back(lock_worker);
+    threads.emplace_back(try_worker);
+    threads.emplace_back(try_worker);
+    threads.clear();
+
+    ASSERT_FALSE(race.load()) << "race condition with mixed lock/try_lock";
+}

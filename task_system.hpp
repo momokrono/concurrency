@@ -170,7 +170,11 @@ public:
 
     template<typename F, typename ...Args>
     constexpr auto async(F && f, Args &&... args) noexcept -> void {
-        // Wrap once, only consume on successful enqueue
+        // Wrap once, only consume on successful enqueue.
+        // Increment submitted BEFORE enqueuing: prevents a race where a worker
+        // pops and completes before the counter update, causing wait_all_tasks()
+        // to miss follow-up re-entrant async submissions.
+        _submitted_tasks.fetch_add(1, std::memory_order_release);
         auto task = std::move_only_function<void()>(
             [ fn = std::forward<F>(f), args = std::tuple{std::forward<Args>(args)...} ]() mutable {
                 return std::apply(std::move(fn), std::move(args));
@@ -178,12 +182,10 @@ public:
         auto i = _index++;
         for ( unsigned n = 0; n != _count * 8; ++n ) {
             if ( _q[ (i + n) % _count ].try_push(std::move(task)) ) {
-                _submitted_tasks.fetch_add(1, std::memory_order_release);
                 return;
             }
         }
         _q[ i % _count ].push(std::move(task));
-        _submitted_tasks.fetch_add(1, std::memory_order_release);
     }
 
     template<typename F, typename ...Args>

@@ -12,3 +12,4 @@ baseline_bench
 *.out
 .piwd/
 .pi-loop.json.lock
+cmake_install.cmake
