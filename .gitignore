@@ -8,6 +8,7 @@ old_main
 /tests
 /test
 benchmarks
+/benchmarks
 baseline_bench
 *.o
 *.out

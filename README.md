@@ -2,57 +2,107 @@
 
 A high-performance C++26 work-stealing task system with custom synchronization primitives.
 
-## Header-only library
+Header-only. No dependencies. Drop `include/` into your project and go.
 
-| File | Description |
-|---|---|
-| `custom_locks.hpp` | `spin_mutex` and `ticket_mutex` with `try_lock()` support. Uses C++20 `atomic::wait`/`notify` and `hardware_destructive_interference_size` for cache-line padding. C++26 `std::is_sufficiently_aligned` validates alignment at construction. |
-| `task_system.hpp` | Work-stealing task system with `async`, `async_with_future`, `wait_all_tasks`, `sync_point`, `stop`, and `clear`. Per-thread notification queues with non-blocking `try_push`/`try_pop` for fast work-stealing, falling back to blocking `push`/`pop` with `std::condition_variable_any`. Task parameters are captured via `std::tuple` + `std::apply`. |
+## Quick Start
+
+```cpp
+#include <concurrency/task_system.hpp>
+
+int main() {
+    concurrency::task_system ts;  // uses all cores
+
+    // Fire-and-forget
+    ts.async([] { heavy_work(); });
+
+    // With future
+    auto f = ts.async_with_future([] { return compute(); });
+    int result = f.get();
+
+    // Synchronize
+    ts.sync_point();       // all tasks submitted before this call
+    ts.wait_all_tasks();   // every task, including later submissions
+}
+```
 
 ## API
 
 ```cpp
-task_system ts;
+namespace concurrency {
 
-// Fire-and-forget with arguments
-ts.async([](int a, int b) { return a + b; }, 10, 20);
+class task_system {
+public:
+    task_system(unsigned threads = std::thread::hardware_concurrency());
+    ~task_system();  // joins all workers
 
-// Fire-and-forget with future
-auto future = ts.async_with_future([] { return 42; });
-int result = future.get(); // blocks until ready
+    // Submit
+    void async(F&& f, Args&&... args);          // fire-and-forget
+    bool try_async(F&& f, Args&&... args);      // returns false if queues full
+    auto async_with_future(F&& f, Args&&...);  // → std::future<R>
 
-// Synchronization
-ts.sync_point();       // wait for all tasks submitted before this call
-ts.wait_all_tasks();   // wait for ALL submitted tasks (stricter)
+    // Synchronize
+    void sync_point();       // wait for tasks submitted before this call
+    void wait_all_tasks();   // wait for all tasks (including during wait)
 
-// Lifecycle
-ts.clear();            // drop pending (unstarted) tasks
-ts.stop();             // request worker threads to stop
-// ~task_system() joins all workers
+    // Observe
+    unsigned active_tasks() const;      // currently executing
+    unsigned long pending_tasks() const; // submitted minus completed
+    unsigned worker_count() const;      // thread count
+
+    // Control
+    void stop();             // request workers to stop
+    size_t clear();          // drop queued tasks, returns count
+};
+
+struct spin_mutex;     // park-on-contention, atomic_flag::wait
+struct ticket_mutex;   // FIFO fair, atomic::wait
+
+}
 ```
 
 ## Building
 
-```bash
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-ninja -C build
-
-./build/tests      # GoogleTest suite (32 tests)
-./build/benchmarks # throughput + latency benchmarks
-./build/main       # demo
+### CMake (as dependency)
+```cmake
+include(FetchContent)
+FetchContent_Declare(concurrency
+    GIT_REPOSITORY https://github.com/momokrono/concurrency
+    GIT_TAG master)
+FetchContent_MakeAvailable(concurrency)
+target_link_libraries(my_app concurrency::concurrency)
 ```
 
-Requires: C++26 (`-std=c++26`), CMake 3.20+, GCC 16+ or Clang 19+.
+### Direct include
+```bash
+g++ -std=c++26 -Ipath/to/concurrency/include my_app.cpp -lpthread
+```
+
+### Run tests
+```bash
+cmake -B build -DBUILD_TESTING=ON
+cmake --build build
+./build/tests/tests    # 40 tests, TSAN-clean
+```
+
+## Examples
+
+```bash
+# Mandelbrot renderer — one async per row
+g++ -std=c++26 -O3 -o mandelbrot examples/mandelbrot.cpp -Iinclude -lpthread
+./mandelbrot > image.pgm
+```
 
 ## Design
 
-Based on [Sean Parent's "Better Code: Concurrency"](https://www.youtube.com/watch?v=zULU6Hhp42w) with custom synchronization primitives from [CppCon 2019](https://github.com/CppCon/CppCon2019/blob/master/Presentations/cpp20_synchronization_library/cpp20_synchronization_library__r2__bryce_adelstein_lelbach__cppcon_2019.pdf).
+Based on [Sean Parent's "Better Code: Concurrency"](https://www.youtube.com/watch?v=zULU6Hhp42w) with custom locks from [CppCon 2019](https://github.com/CppCon/CppCon2019/tree/master/Presentations/cpp20_synchronization_library).
 
-Notable differences from the reference:
-- `spin_mutex` instead of `std::mutex` for queue locks
-- `std::condition_variable_any` (was `std::binary_semaphore` originally, changed to fix a race condition)
-- `std::move_only_function` instead of `std::function` (avoids heap allocation for small callables)
-- `std::jthread` with `std::stop_token` for cooperative shutdown
-- Exception-safe task execution (failed tasks don't kill worker threads)
-- `try_lock()` on custom mutexes (required for non-blocking queue operations)
-- Memory ordering: `release` on task submission/completion, `acquire` on synchronization points
+Key features:
+- Work-stealing across per-thread notification queues
+- `std::atomic::wait`/`notify` (C++20) — no busy-spinning
+- `std::move_only_function` — no heap allocation for small callables
+- `std::jthread` with `std::stop_token` — cooperative shutdown
+- Exception-safe — failed tasks don't kill workers
+- Adaptive probe windows — 6×_count probes when busy, 2× after idle
+- C++26 `std::is_sufficiently_aligned` validation in `ticket_mutex`
+
+Requires: C++23 (`std::move_only_function`), C++26 for alignment checks. GCC 16+ or Clang 19+.

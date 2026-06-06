@@ -7,7 +7,11 @@
 #include <atomic>
 #include <future>
 #include <latch>
-#include "task_system.hpp"
+#include <concurrency/task_system.hpp>
+
+using concurrency::spin_mutex;
+using concurrency::ticket_mutex;
+using concurrency::task_system;
 #include "custom_locks.hpp"
 
 // Benchmark utilities
