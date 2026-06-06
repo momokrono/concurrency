@@ -48,12 +48,15 @@ public:
         _ready.notify_all();
     }
 
-    auto clear() noexcept -> void {
+    auto clear() noexcept -> size_t {
+        size_t dropped = 0;
         {
             lock_t lock{_mutex};
+            dropped = _q.size();
             _q.clear();
         }
         _ready.notify_all();
+        return dropped;
     }
 
     auto pop(std::move_only_function<void()>& x) noexcept -> bool {
@@ -139,13 +142,14 @@ public:
         for ( auto & t : _threads ) { t.request_stop(); }
     }
 
-    constexpr auto clear() noexcept -> void {
-        for ( auto & q : _q ) { q.clear(); }
-        // Reset submitted count to match completed — cleared tasks are gone.
-        // Uses release/acquire to pair with the load in wait_all_tasks/sync_point.
-        _submitted_tasks.store(
-            _completed_tasks.load(std::memory_order_acquire),
-            std::memory_order_release);
+    /// Drops all pending (queued but not yet started) tasks.
+    /// Returns the number of tasks dropped.
+    constexpr auto clear() noexcept -> size_t {
+        size_t dropped = 0;
+        for ( auto & q : _q ) { dropped += q.clear(); }
+        // Subtract dropped tasks so wait_all_tasks/sync_point don't wait for them.
+        _submitted_tasks.fetch_sub(dropped, std::memory_order_release);
+        return dropped;
     }
 
     constexpr auto sync_point() noexcept -> void {

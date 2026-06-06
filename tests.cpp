@@ -281,16 +281,21 @@ TEST(TaskSystem, ShutdownUnderLoad) {
 }
 
 TEST(TaskSystem, Clear) {
-    task_system ts{4};
+    task_system ts{1};  // single worker — queues fill up fast
     std::atomic<int> c{0};
+    constexpr int n = 200'000;
 
-    // Submit, then clear
-    for (int i = 0; i < 50'000; ++i)
+    for (int i = 0; i < n; ++i)
         ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
-    ts.clear();
 
-    // After clear, can't use wait_all_tasks (cleared tasks = broken submit/complete match).
-    // Submit fresh batch to verify system still works.
+    size_t dropped = ts.clear();
+    // On a fast system, workers may consume all tasks before clear().
+    // But clear() must not crash and must return a sane value.
+    ASSERT_LE(dropped, (size_t)n) << "can't drop more than submitted";
+
+    // After clear, system still works with wait_all_tasks
+    ts.wait_all_tasks();  // must not hang
+
     std::atomic<int> c2{0};
     for (int i = 0; i < 1'000; ++i)
         ts.async([&] { c2.fetch_add(1, std::memory_order_relaxed); });
@@ -568,13 +573,17 @@ TEST(TaskSystem, ReentrantFutureFromTask) {
 }
 
 TEST(TaskSystem, ConsecutiveClear) {
-    task_system ts{4};
+    task_system ts{1};  // single worker — ensures queues aren't drained instantly
     std::atomic<int> c{0};
+    constexpr int n = 20'000;
 
-    for (int i = 0; i < 10'000; ++i)
+    for (int i = 0; i < n; ++i)
         ts.async([&] { c.fetch_add(1, std::memory_order_relaxed); });
-    ts.clear();
-    ts.clear();  // double clear — must not corrupt state
+
+    size_t d1 = ts.clear();
+    size_t d2 = ts.clear();  // double clear — second should find nothing
+    ASSERT_LE(d1, (size_t)n);
+    ASSERT_EQ(d2, 0u) << "second clear should drop nothing";
 
     // Submit after double-clear
     std::atomic<int> c2{0};
@@ -582,6 +591,25 @@ TEST(TaskSystem, ConsecutiveClear) {
         ts.async([&] { c2.fetch_add(1, std::memory_order_relaxed); });
     ts.wait_all_tasks();
     ASSERT_EQ(c2.load(), 1'000);
+}
+
+// Guaranteed drop: 500k slow tasks flood the queue
+TEST(TaskSystem, ClearGuaranteedDrop) {
+    task_system ts{1};
+    std::atomic<int> c{0};
+    constexpr int n = 100'000;
+
+    for (int i = 0; i < n; ++i)
+        ts.async([&] {
+            // Simulate non-trivial work so workers can't keep up
+            for (volatile int k = 0; k < 100; ++k) {}
+            c.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    size_t dropped = ts.clear();
+    ASSERT_GT(dropped, 0u) << "tasks should overflow the queue";
+    ASSERT_LE(dropped, (size_t)n);
+    ts.wait_all_tasks();
 }
 
 TEST(TaskSystem, HighVolume500k) {
