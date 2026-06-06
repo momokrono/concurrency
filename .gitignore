@@ -5,7 +5,8 @@ build/
 lib/
 main
 old_main
-tests
+/tests
+/test
 benchmarks
 baseline_bench
 *.o
