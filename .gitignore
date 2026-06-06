@@ -1,1 +1,14 @@
 .idea/
+cmake-build-debug/
+cmake-build-release/
+build/
+lib/
+main
+old_main
+tests
+benchmarks
+baseline_bench
+*.o
+*.out
+.piwd/
+.pi-loop.json.lock

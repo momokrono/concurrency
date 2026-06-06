@@ -2,6 +2,8 @@
 #define CUSTOM_LOCKS_HPP
 
 #include <atomic>
+#include <cassert>
+#include <memory>       // std::is_sufficiently_aligned (C++26)
 
 struct spin_mutex {
 private:
@@ -25,6 +27,13 @@ private:
     alignas(std::hardware_destructive_interference_size) std::atomic<int>  in{0};
     alignas(std::hardware_destructive_interference_size) std::atomic<int> out{0};
 public:
+    // C++26: verify cache-line separation at construction time
+    ticket_mutex() noexcept {
+        assert(std::is_sufficiently_aligned<
+            std::hardware_destructive_interference_size>(&in));
+        assert(std::is_sufficiently_aligned<
+            std::hardware_destructive_interference_size>(&out));
+    }
     constexpr auto lock() noexcept -> void {
         auto const my = in.fetch_add(1, std::memory_order_acquire);
         while (true) {
@@ -38,8 +47,11 @@ public:
         out.notify_all();
     }
     constexpr auto try_lock() noexcept -> bool {
+        // acquire on success (to see prior unlocks), relaxed on failure
         if (auto ticket = out.load(std::memory_order_acquire);
-            in.compare_exchange_strong(ticket, ticket + 1, std::memory_order_acq_rel)) {
+            in.compare_exchange_strong(ticket, ticket + 1,
+                                       std::memory_order_acquire,
+                                       std::memory_order_relaxed)) {
             return true;
         }
         return false;

@@ -1,0 +1,32 @@
+BASELINE (before changes) — 32 cores, GCC 16.1.1, C++26, -O3
+
+=== Lock Contention ===
+  spin_mutex(warm)  144989 µs  per-op= 453.1 ns
+        spin_mutex  144369 µs  per-op= 451.2 ns
+      ticket_mutex  301710 µs  per-op= 942.8 ns
+        std::mutex   12285 µs  per-op=  38.4 ns
+
+=== Task Latency (submit→exec) ===
+  mean=2.2 p50=1.6 p95=6.0 p99=9.4 p999=20.9 µs  (n=2000)
+
+=== Throughput Scaling (50k tasks) ===
+  producers=1   tps=936,540
+  producers=2   tps=1,106,464
+  producers=4   tps=1,489,425
+  producers=8   tps=1,985,545
+  producers=16  tps=3,671,881
+  producers=32  tps=3,739,996
+
+=== Work-Stealing ===
+  producers=1   tps=1,371,805
+  producers=8   tps=2,782,415
+
+=== async_with_future (5k) ===
+  tps=592,136
+
+=== try_lock Hit Rate ===
+  spin_mutex    13.0%
+  ticket_mutex   5.8%
+
+=== Pipeline (100×200) ===
+  (timed out — too slow)
