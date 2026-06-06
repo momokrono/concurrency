@@ -7,4 +7,4 @@ target_link_libraries(tests
     GTest::gtest_main
     pthread)
 
-target_compile_features(tests PRIVATE cxx_std_23)
+target_compile_features(tests PRIVATE cxx_std_26)

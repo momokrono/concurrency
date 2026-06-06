@@ -3,10 +3,7 @@
 
 #include <atomic>
 #include <cassert>
-#include <version>
-#if __cpp_lib_is_sufficiently_aligned >= 202503L
 #include <memory>       // std::is_sufficiently_aligned (C++26)
-#endif
 
 namespace concurrency {
 
@@ -34,12 +31,10 @@ private:
 public:
     // C++26: verify cache-line separation at construction time
     ticket_mutex() noexcept {
-#if __cpp_lib_is_sufficiently_aligned >= 202503L
         assert(std::is_sufficiently_aligned<
             std::hardware_destructive_interference_size>(&in));
         assert(std::is_sufficiently_aligned<
             std::hardware_destructive_interference_size>(&out));
-#endif
     }
     constexpr auto lock() noexcept -> void {
         auto const my = in.fetch_add(1, std::memory_order_acquire);
